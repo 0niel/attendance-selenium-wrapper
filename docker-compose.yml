@@ -1,0 +1,118 @@
+version: "3.9"
+
+services:
+  traefik:
+    image: traefik:latest
+    command:
+      - --accesslog=true
+      - --log.level=INFO
+      - --providers.docker=true
+      - --providers.docker.exposedByDefault=false
+      - --providers.docker.constraints=Label(`traefik.constraint-label-stack`,`map`)
+      - --entrypoints.map_web.address=:80
+      - --entrypoints.map_websecure.address=:443
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge=true
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=map_web
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+    restart: unless-stopped
+    ports:
+      - 80:80
+      - 443:443
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data/letsencrypt:/letsencrypt
+    networks:
+      - gateway
+      - application
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80"
+    depends_on:
+      broker:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    networks:
+      - default
+      - application
+    labels:
+      - traefik.enable=true
+      - traefik.constraint-label-stack=map
+      - traefik.docker.network=application
+      - traefik.http.services.map.loadbalancer.server.port=80
+      #http
+      - traefik.http.routers.map_http.entrypoints=map_web
+      - traefik.http.routers.map_http.rule=Host(`1934811-ck50385.twc1.net`)
+      - traefik.http.routers.map_http.service=map
+      - traefik.http.routers.map_http.middlewares=map_redirect_https
+      # https
+      - traefik.http.middlewares.map_redirect_https.redirectscheme.scheme=https
+      - traefik.http.middlewares.map_redirect_https.redirectscheme.permanent=true
+      - traefik.http.routers.map_https.entrypoints=map_websecure
+      - traefik.http.routers.map_https.rule=Host(`1934811-ck50385.twc1.net`)
+      - traefik.http.routers.map_https.service=map
+      - traefik.http.routers.map_https.tls=true
+      - traefik.http.routers.map_https.tls.certresolver=letsencrypt
+
+
+  broker:
+    image: rabbitmq:3-management
+    environment:
+      RABBITMQ_DEFAULT_USER: ${BROKER_USER}
+      RABBITMQ_DEFAULT_PASS: ${BROKER_PASS}
+    volumes:
+      - broker:/var/lib/rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: rabbitmq-diagnostics check_running
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - default
+      - application
+    
+  selenium:
+    image: selenium/standalone-chrome:latest
+    # ports:
+    #   - "4444:4444"
+    shm_size: 2gb
+    # Message: unknown error: net::ERR_PROXY_CONNECTION_FAILED
+    environment:
+      - HTTP_PROXY=""
+      - HTTPS_PROXY=""
+      - NO_PROXY
+      - SE_NODE_OVERRIDE_MAX_SESSIONS=2
+      - SE_NODE_MAX_SESSIONS=2
+    networks:
+      - application
+      - default
+
+  worker:
+    build:
+      context: .
+      dockerfile: ./worker/Dockerfile
+    environment:
+      BROKER_URL: ${BROKER_URL}
+      LOG_LEVEL: DEBUG
+      C_FORCE_ROOT: true
+    depends_on:
+      broker:
+        condition: service_healthy
+    networks:
+      - default
+      - application
+
+networks:
+  gateway:
+  application:
+
+
+volumes:
+  broker:
